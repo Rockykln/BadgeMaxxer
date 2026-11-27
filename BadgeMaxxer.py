@@ -67,6 +67,8 @@ WATCHER_PACKAGES = ("websockets", "davey")
 STREAMER_DIR = WORKSPACE_DIR / "Streamer"
 STREAMER_SCRIPT = STREAMER_DIR / "Streamer.js"
 STREAMER_STATS = STREAMER_DIR / "streamer_stats.json"
+STREAMER_HANDOFF = STREAMER_DIR / "streamertoken_handoff.json"
+STREAMER_HANDOFF_TTL = 120.0
 STREAMER_PINS = {"@lng2004/discord.js-selfbot-v13": "3.7.2", "@dank074/discord-video-stream": "7.0.0"}
 STREAMER_PACKAGES = tuple(STREAMER_PINS)
 STREAMER_NODE_MIN = (22, 18)
@@ -2842,18 +2844,57 @@ class ApplicationController:
         account = extract_account_snowflake(self.state.token)
         if account.isdigit():
             cmd += ["--expect", account]
-        if os.name == "nt":
-            proc = subprocess.Popen(cmd, cwd=str(STREAMER_DIR), creationflags=subprocess.CREATE_NEW_CONSOLE)
-        else:
+        terminal = None
+        if os.name != "nt":
             terminal = find_terminal_posix()
             if not terminal:
                 C.warn("streamer", f"run it in another terminal: cd \"{STREAMER_DIR}\" && node Streamer.js {' '.join(cmd[2:])}".rstrip())
                 return None
-            launcher = ["sh", "-c", 'cd "$0" && exec "$@"', str(STREAMER_DIR)]
-            window = subprocess.Popen(terminal + launcher + cmd, cwd=str(STREAMER_DIR), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            proc = PosixWatcherProcess(window, cmd)
-        C.ok("streamer", "opened in a new window, it asks for the account token there once (saved to Streamer/streamertoken2.json), then the voice channel and the duration")
+        handed = self._hand_token_to_streamer()
+        try:
+            if os.name == "nt":
+                proc = subprocess.Popen(cmd, cwd=str(STREAMER_DIR), creationflags=subprocess.CREATE_NEW_CONSOLE)
+            else:
+                launcher = ["sh", "-c", 'cd "$0" && exec "$@"', str(STREAMER_DIR)]
+                window = subprocess.Popen(terminal + launcher + cmd, cwd=str(STREAMER_DIR), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                proc = PosixWatcherProcess(window, cmd)
+        except BaseException:
+            self._drop_streamer_handoff()
+            raise
+        if handed:
+            C.ok("streamer", "opened in a new window, it uses this account's token and asks for the voice channel and the duration")
+        else:
+            C.ok("streamer", "opened in a new window, it asks for the account token there once (saved to Streamer/streamertoken2.json), then the voice channel and the duration")
         return proc
+
+    def _hand_token_to_streamer(self) -> bool:
+        """Leaves this account's token for Streamer.js, which reads and deletes the file on start.
+        Removed here too if the streamer never picks it up."""
+        token = (self.state.token or "").strip()
+        if not token:
+            return False
+        self._drop_streamer_handoff()
+        try:
+            fd = os.open(STREAMER_HANDOFF, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                if os.name == "nt":
+                    secret_store.restrict_file(STREAMER_HANDOFF, force=True)
+                fh.write(json.dumps({"token": token}))
+        except OSError as exc:
+            self._drop_streamer_handoff()
+            self.stream_console.warn("streamer", f"could not pass the token to the streamer ({exc}), it asks for it instead")
+            return False
+        timer = threading.Timer(STREAMER_HANDOFF_TTL, self._drop_streamer_handoff)
+        timer.daemon = True
+        timer.start()
+        return True
+
+    @staticmethod
+    def _drop_streamer_handoff() -> None:
+        try:
+            STREAMER_HANDOFF.unlink()
+        except OSError:
+            pass
 
     def _streamer_totals(self) -> tuple[float, int]:
         try:

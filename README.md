@@ -135,7 +135,7 @@ For stream time to count:
 | `requirements.txt` | Python packages: `websockets`, `davey` |
 | `session.json` | Token, cookie, fingerprint and totals (created on first run) |
 | `Watcher/watcher_session.json` | Alt account token for the Watcher (created on first Watcher run) |
-| `Streamer/streamertoken2.json` | Account token for the streamer (created on first Streaming run) |
+| `Streamer/streamertoken2.json` | Account token for the streamer, only when you start `Streamer.js` yourself (Streaming in BadgeMaxxer passes its own token) |
 | `Streamer/streamer_stats.json` | Hours and sessions streamed, read by the Streaming menu |
 | `data/games.json` | Cached games catalog from `cdn.discordapp.com/detectables/games.json`. Delete it to refresh. |
 
@@ -145,7 +145,7 @@ For stream time to count:
 - `session.json` and `Watcher/watcher_session.json` keep the Discord tokens, cookie, analytics token, GitHub token and fingerprint encrypted with Windows DPAPI (tied to your Windows user) or in the Linux desktop keyring (needs `secret-tool` from libsecret). On Windows the files are also locked to your user with an ACL. Without `secret-tool` on Linux they fall back to plaintext with mode 0600 and a warning. Old plaintext files are migrated on the next start. This does not stop a program already running as you from asking for the secrets. Never share or commit these files.
 - The GitHub login is only used to check your star and follow, and requests no scopes (public read only). To revoke it, remove the app under GitHub Settings > Applications.
 - `Watcher/watcher_session.json` and `Watcher/watcher_debug.log` are git-ignored. Do not commit them.
-- `Streamer/streamertoken2.json` holds the streamer's token in plaintext (mode 0600 on Linux). It is git-ignored, never share or commit it.
+- `Streamer/streamertoken2.json` holds the streamer's token in plaintext (mode 0600 on Linux). Streaming from BadgeMaxxer does not create it: BadgeMaxxer leaves its token in `Streamer/streamertoken_handoff.json`, which `Streamer.js` reads and deletes on start (BadgeMaxxer removes it after two minutes if the streamer never started). Both are git-ignored, never share or commit them.
 - The Watcher needs all three files in `Watcher/`. `Streamer/Streamer.js` and `Streamer/package.json` must also be in the release. A release must contain every installed file in `SHA256SUMS`, or the installers stop with "no checksum listed".
 
 ## Disclaimer
