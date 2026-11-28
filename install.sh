@@ -6,7 +6,7 @@ REPO="badgemaxxer"
 TAG="${BADGEMAXXER_TAG:-}"
 RELEASES="https://github.com/$OWNER/$REPO/releases"
 DIR="$HOME/BadgeMaxxer"
-FILES="BadgeMaxxer.py lib/secret_store.py Watcher/stream_watcher.py Watcher/watcher_voice.py Watcher/watcher_common.py Streamer/Streamer.js Streamer/package.json"
+FILES="BadgeMaxxer.py lib/secret_store.py lib/auto_install.py Watcher/stream_watcher.py Watcher/watcher_voice.py Watcher/watcher_common.py Streamer/Streamer.js Streamer/package.json HypeSquad/HypeSquad_Picker.py"
 PACKAGES="websockets davey"
 
 if [ -t 1 ]; then
