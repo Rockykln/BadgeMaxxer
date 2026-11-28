@@ -666,6 +666,15 @@ def copy_to_clipboard_posix(text: str) -> bool:
                 return True
             except Exception:
                 continue
+    # KDE Plasma does not come with wl-copy, its clipboard manager takes the text over D-Bus
+    if shutil.which("gdbus"):
+        try:
+            subprocess.run(["gdbus", "call", "--session", "--dest", "org.kde.klipper", "--object-path", "/klipper",
+                            "--method", "org.kde.klipper.klipper.setClipboardContents", text],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=5)
+            return True
+        except Exception:
+            pass
     return False
 
 
@@ -2028,7 +2037,9 @@ def can_open_browser() -> bool:
         browser = webbrowser.get()
     except webbrowser.Error:
         return False
-    return bool(os.environ.get("BROWSER")) or not isinstance(browser, webbrowser.GenericBrowser)
+    # xdg-open and the other desktop openers are BackgroundBrowser, a GenericBrowser subclass
+    return (bool(os.environ.get("BROWSER")) or isinstance(browser, webbrowser.BackgroundBrowser)
+            or not isinstance(browser, webbrowser.GenericBrowser))
 
 
 def github_device_login(T: "TerminalInterface") -> str:
@@ -2042,13 +2053,19 @@ def github_device_login(T: "TerminalInterface") -> str:
         return ""
     url = d.get("verification_uri", "https://github.com/login/device")
     T.log(f"Open {T.COLOR_PRIMARY}{url}{T.COLOR_TEXT} and enter the code {T.COLOR_PRIMARY}{d['user_code']}{T.COLOR_TEXT}")
-    if copy_to_clipboard(str(d["user_code"])):
-        T.log("The code is in your clipboard, paste it on the GitHub page.")
+    copied = copy_to_clipboard(str(d["user_code"]))
+    opened = False
     if can_open_browser():
         try:
-            webbrowser.open(url)
+            opened = webbrowser.open(url)
         except Exception:
             pass
+    if opened and copied:
+        T.log("The page is opening in your browser and the code is in your clipboard, paste it there.")
+    elif opened:
+        T.log("The page is opening in your browser.")
+    elif copied:
+        T.log("The code is in your clipboard, paste it on the GitHub page.")
     T.log("waiting for you to approve in the browser...")
     interval = int(d.get("interval", 5))
     deadline = time.time() + int(d.get("expires_in", 900))
