@@ -6,6 +6,7 @@ const { spawn, execFile } = require("child_process");
 
 const CONFIG = {
   tokenFile: path.join(__dirname, "streamertoken2.json"),
+  handoffFile: path.join(__dirname, "streamertoken_handoff.json"),
   statsFile: path.join(__dirname, "streamer_stats.json"),
   ffmpeg: "ffmpeg",
   videoFile: path.join(__dirname, "assets", "video.mp4"),
@@ -533,6 +534,11 @@ function patchGateway(client) {
 const loadToken = () => {
   try { return JSON.parse(fs.readFileSync(CONFIG.tokenFile, "utf8")).token || null; } catch { return null; }
 };
+// BadgeMaxxer leaves its account token here when it opens the streamer, read it once and delete it
+const takeHandoff = () => {
+  try { return JSON.parse(fs.readFileSync(CONFIG.handoffFile, "utf8")).token || null; } catch { return null; }
+  finally { try { fs.unlinkSync(CONFIG.handoffFile); } catch {} }
+};
 const saveToken = t => {
   fs.writeFileSync(CONFIG.tokenFile, JSON.stringify({ token: t }, null, 2), { mode: 0o600 });
   try { fs.chmodSync(CONFIG.tokenFile, 0o600); } catch {}
@@ -582,11 +588,16 @@ async function main() {
   const ex = process.argv.indexOf("--expect");
   const expectId = ex > 0 && /^\d+$/.test(process.argv[ex + 1] || "") ? process.argv[ex + 1] : "";
   let client = new Client();
-  let token = loadToken(), saved = !!token;
+  let handed = takeHandoff();
+  let token = handed || loadToken(), saved = !handed && !!token;
   for (;;) {
     while (!token) { token = await ask("token: ", true); saved = false; }
     try {
       await client.login(token);
+      if (handed) {
+        handed = null;
+        break;
+      }
       if (expectId && client.user.id !== expectId) {
         console.log(`this ${saved ? "saved " : ""}token belongs to @${client.user.username}, BadgeMaxxer uses another account`);
         console.log("enter the token of the account BadgeMaxxer is logged in with");
@@ -602,6 +613,8 @@ async function main() {
     } catch (e) {
       console.log("login failed:", e.message || e);
       if (/invalid|unauthor|401/i.test(String(e.message || e))) {
+        if (handed) console.log("BadgeMaxxer's token was rejected, enter the token here");
+        handed = null;
         token = null;
         try { fs.unlinkSync(CONFIG.tokenFile); } catch {}
       } else {

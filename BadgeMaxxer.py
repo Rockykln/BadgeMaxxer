@@ -67,6 +67,8 @@ WATCHER_PACKAGES = ("websockets", "davey")
 STREAMER_DIR = WORKSPACE_DIR / "Streamer"
 STREAMER_SCRIPT = STREAMER_DIR / "Streamer.js"
 STREAMER_STATS = STREAMER_DIR / "streamer_stats.json"
+STREAMER_HANDOFF = STREAMER_DIR / "streamertoken_handoff.json"
+STREAMER_HANDOFF_TTL = 120.0
 STREAMER_PINS = {"@lng2004/discord.js-selfbot-v13": "3.7.2", "@dank074/discord-video-stream": "7.0.0"}
 STREAMER_PACKAGES = tuple(STREAMER_PINS)
 STREAMER_NODE_MIN = (22, 18)
@@ -664,7 +666,26 @@ def copy_to_clipboard_posix(text: str) -> bool:
                 return True
             except Exception:
                 continue
+    # KDE Plasma does not come with wl-copy, its clipboard manager takes the text over D-Bus
+    if shutil.which("gdbus"):
+        try:
+            subprocess.run(["gdbus", "call", "--session", "--dest", "org.kde.klipper", "--object-path", "/klipper",
+                            "--method", "org.kde.klipper.klipper.setClipboardContents", text],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=5)
+            return True
+        except Exception:
+            pass
     return False
+
+
+def copy_to_clipboard(text: str) -> bool:
+    if os.name == "nt":
+        try:
+            subprocess.run(["clip"], input=text.encode("utf-8"), check=True, timeout=5)
+            return True
+        except Exception:
+            return False
+    return copy_to_clipboard_posix(text)
 
 
 def read_key() -> str:
@@ -2016,7 +2037,9 @@ def can_open_browser() -> bool:
         browser = webbrowser.get()
     except webbrowser.Error:
         return False
-    return bool(os.environ.get("BROWSER")) or not isinstance(browser, webbrowser.GenericBrowser)
+    # xdg-open and the other desktop openers are BackgroundBrowser, a GenericBrowser subclass
+    return (bool(os.environ.get("BROWSER")) or isinstance(browser, webbrowser.BackgroundBrowser)
+            or not isinstance(browser, webbrowser.GenericBrowser))
 
 
 def github_device_login(T: "TerminalInterface") -> str:
@@ -2030,11 +2053,19 @@ def github_device_login(T: "TerminalInterface") -> str:
         return ""
     url = d.get("verification_uri", "https://github.com/login/device")
     T.log(f"Open {T.COLOR_PRIMARY}{url}{T.COLOR_TEXT} and enter the code {T.COLOR_PRIMARY}{d['user_code']}{T.COLOR_TEXT}")
+    copied = copy_to_clipboard(str(d["user_code"]))
+    opened = False
     if can_open_browser():
         try:
-            webbrowser.open(url)
+            opened = webbrowser.open(url)
         except Exception:
             pass
+    if opened and copied:
+        T.log("The page is opening in your browser and the code is in your clipboard, paste it there.")
+    elif opened:
+        T.log("The page is opening in your browser.")
+    elif copied:
+        T.log("The code is in your clipboard, paste it on the GitHub page.")
     T.log("waiting for you to approve in the browser...")
     interval = int(d.get("interval", 5))
     deadline = time.time() + int(d.get("expires_in", 900))
@@ -2215,16 +2246,7 @@ class ApplicationController:
         T.log(TOKEN_SNIPPET)
         print_cookie_help(T, TOKEN_HELP)
         if arrow_menu("Use snippet", ["Yes", "No (enter manually)"]) == 0:
-            try:
-                if os.name == "nt":
-                    subprocess.run(["clip"], input=TOKEN_SNIPPET.encode("ascii"), check=True)
-                    T.log("Copied to clipboard.")
-                elif copy_to_clipboard_posix(TOKEN_SNIPPET):
-                    T.log("Copied to clipboard.")
-                else:
-                    T.log("Copy the snippet above manually.")
-            except Exception:
-                pass
+            T.log("Copied to clipboard." if copy_to_clipboard(TOKEN_SNIPPET) else "Copy the snippet above manually.")
             T.log("Open Discord (web or desktop), press Ctrl+Shift+I, open Console, paste, press Enter.")
             T.log("A browser may refuse the paste until you type: allow pasting. On Linux the desktop app has no console, use the browser.")
             T.log("The snippet copies your token to the clipboard itself. Come back here and paste it below.")
@@ -2232,7 +2254,7 @@ class ApplicationController:
             T.log("Paste your Discord account authorization token:")
         val = ""
         for _ in range(3):
-            raw = input(f"  {T.COLOR_MUTED}token:{T.COLOR_RESET} ")
+            raw = secret_store.masked_input(f"  {T.COLOR_MUTED}token:{T.COLOR_RESET} ")
             if not raw.strip():
                 break
             val, problem = clean_token(raw)
@@ -2839,18 +2861,57 @@ class ApplicationController:
         account = extract_account_snowflake(self.state.token)
         if account.isdigit():
             cmd += ["--expect", account]
-        if os.name == "nt":
-            proc = subprocess.Popen(cmd, cwd=str(STREAMER_DIR), creationflags=subprocess.CREATE_NEW_CONSOLE)
-        else:
+        terminal = None
+        if os.name != "nt":
             terminal = find_terminal_posix()
             if not terminal:
                 C.warn("streamer", f"run it in another terminal: cd \"{STREAMER_DIR}\" && node Streamer.js {' '.join(cmd[2:])}".rstrip())
                 return None
-            launcher = ["sh", "-c", 'cd "$0" && exec "$@"', str(STREAMER_DIR)]
-            window = subprocess.Popen(terminal + launcher + cmd, cwd=str(STREAMER_DIR), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            proc = PosixWatcherProcess(window, cmd)
-        C.ok("streamer", "opened in a new window, it asks for the account token there once (saved to Streamer/streamertoken2.json), then the voice channel and the duration")
+        handed = self._hand_token_to_streamer()
+        try:
+            if os.name == "nt":
+                proc = subprocess.Popen(cmd, cwd=str(STREAMER_DIR), creationflags=subprocess.CREATE_NEW_CONSOLE)
+            else:
+                launcher = ["sh", "-c", 'cd "$0" && exec "$@"', str(STREAMER_DIR)]
+                window = subprocess.Popen(terminal + launcher + cmd, cwd=str(STREAMER_DIR), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                proc = PosixWatcherProcess(window, cmd)
+        except BaseException:
+            self._drop_streamer_handoff()
+            raise
+        if handed:
+            C.ok("streamer", "opened in a new window, it uses this account's token and asks for the voice channel and the duration")
+        else:
+            C.ok("streamer", "opened in a new window, it asks for the account token there once (saved to Streamer/streamertoken2.json), then the voice channel and the duration")
         return proc
+
+    def _hand_token_to_streamer(self) -> bool:
+        """Leaves this account's token for Streamer.js, which reads and deletes the file on start.
+        Removed here too if the streamer never picks it up."""
+        token = (self.state.token or "").strip()
+        if not token:
+            return False
+        self._drop_streamer_handoff()
+        try:
+            fd = os.open(STREAMER_HANDOFF, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                if os.name == "nt":
+                    secret_store.restrict_file(STREAMER_HANDOFF, force=True)
+                fh.write(json.dumps({"token": token}))
+        except OSError as exc:
+            self._drop_streamer_handoff()
+            self.stream_console.warn("streamer", f"could not pass the token to the streamer ({exc}), it asks for it instead")
+            return False
+        timer = threading.Timer(STREAMER_HANDOFF_TTL, self._drop_streamer_handoff)
+        timer.daemon = True
+        timer.start()
+        return True
+
+    @staticmethod
+    def _drop_streamer_handoff() -> None:
+        try:
+            STREAMER_HANDOFF.unlink()
+        except OSError:
+            pass
 
     def _streamer_totals(self) -> tuple[float, int]:
         try:
