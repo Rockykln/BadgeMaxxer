@@ -140,16 +140,51 @@ def discard(name: str) -> None:
         _secret_tool(["clear", "service", SERVICE, "name", _item(name)])
 
 
+def read_clipboard() -> str | None:
+    """First line of the clipboard text, "" when it is empty, None when no clipboard tool works."""
+    if os.name == "nt":
+        # a cold PowerShell start can take several seconds
+        tries = [(["powershell", "-NoProfile", "-Command", "Get-Clipboard"], 10)]
+    elif sys.platform == "darwin":
+        tries = [(["pbpaste"], 3)]
+    else:
+        tries = [(["wl-paste", "-n"], 3), (["xclip", "-o", "-selection", "clipboard"], 3), (["xsel", "-b", "-o"], 3),
+                 (["gdbus", "call", "--session", "--dest", "org.kde.klipper", "--object-path", "/klipper",
+                   "--method", "org.kde.klipper.klipper.getClipboardContents"], 3),
+                 (["termux-clipboard-get"], 3)]
+    for cmd, timeout in tries:
+        if not shutil.which(cmd[0]):
+            continue
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore",
+                                 timeout=timeout, stdin=subprocess.DEVNULL)
+        except Exception:
+            continue
+        if out.returncode != 0:
+            continue
+        text = out.stdout
+        if cmd[0] == "gdbus":
+            m = re.fullmatch(r"\('(.*)',\)\s*", text, re.S)
+            if not m:
+                continue
+            text = m.group(1)
+        first = (text.splitlines() or [""])[0]
+        return "".join(c for c in first if c.isprintable()).strip()
+    return None
+
+
 def masked_input(prompt: str) -> str:
     """Like input(), but echoes one * per character so a token never shows on screen."""
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         return input(prompt)
     room = max(1, shutil.get_terminal_size((80, 24)).columns - len(re.sub(r"\x1b\[[0-9;]*m", "", prompt)) - 1)
     chars: list[str] = []
+    hinted = False
     sys.stdout.write(prompt)
     sys.stdout.flush()
 
     def feed(text: str) -> bool:
+        nonlocal hinted
         # stars stop at the line end, so backspace never has to cross a wrapped line
         for ch in re.sub(r"\x1b(\[[0-9;?]*[ -/]*[@-~]|O.)?", "", text):
             if ch in ("\r", "\n"):
@@ -164,6 +199,15 @@ def masked_input(prompt: str) -> str:
             elif ch == "\x15":
                 sys.stdout.write("\b \b" * min(len(chars), room))
                 chars.clear()
+            elif ch == "\x16":
+                # Ctrl+V arrives as a key when the terminal does not paste by itself
+                clip = read_clipboard()
+                if clip:
+                    feed(clip)
+                elif clip is None and not hinted:
+                    hinted = True
+                    sys.stdout.write("\r\nCould not read the clipboard, paste with Ctrl+Shift+V or a right click.\r\n"
+                                     + prompt + "*" * min(len(chars), room))
             elif ch.isprintable():
                 chars.append(ch)
                 if len(chars) <= room:
