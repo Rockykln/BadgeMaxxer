@@ -25,6 +25,8 @@ from watcher_common import (
     websockets,
 )
 
+MAX_MLS_FAILURES = 3
+
 
 class VoiceLink:
     def __init__(self, label, endpoint, server_id, user_id, session_id, token,
@@ -60,6 +62,7 @@ class VoiceLink:
         self.dave = None
         self.dave_version = 0
         self.pending = {}
+        self.mls_failures = 0
 
     def say(self, msg):
         log(f"[{self.label}] {msg}")
@@ -265,6 +268,8 @@ class VoiceLink:
     async def dave_prepare_transition(self, data):
         tid = data.get("transition_id")
         self.pending[tid] = data.get("protocol_version", 0)
+        if self.dave is not None:
+            self.dave.prepare_transition(tid, self.pending[tid])
         if tid == 0:
             self.dave_execute(0)
         else:
@@ -277,6 +282,9 @@ class VoiceLink:
             return
         old = self.dave_version
         self.dave_version = self.pending.pop(tid)
+        if self.dave is not None:
+            # davey only switches to the new keys here
+            self.dave.execute_transition(tid)
         if old != self.dave_version and self.dave_version == 0:
             self.say("call downgraded to non-E2EE")
             self.dave_ready.set()
@@ -291,15 +299,24 @@ class VoiceLink:
         try:
             fn(payload)
         except Exception as exc:
+            self.mls_failures += 1
+            if "UnexpectedGroupId" in str(exc) or self.mls_failures >= MAX_MLS_FAILURES:
+                # a fresh start would only bring the next unusable welcome, so try the next strategy
+                self.say(f"MLS {what} failed ({exc}), dropping the connection")
+                await self.ws.close(code=4000)
+                return
             self.say(f"MLS {what} failed ({exc}), asking for a fresh start")
             await self.send_json(31, {"transition_id": tid})
             await self.reinit_dave()
             return
+        self.mls_failures = 0
         self.say(f"MLS {what} processed")
-        if tid != 0:
-            self.pending[tid] = self.dave_version
+        self.pending[tid] = self.dave_version
+        self.dave.prepare_transition(tid, self.dave_version)
+        if tid == 0:
+            self.dave_execute(0)
+        else:
             await self.send_json(23, {"transition_id": tid})
-        self.check_dave_ready()
 
     async def on_binary(self, msg):
         if len(msg) < 3:
